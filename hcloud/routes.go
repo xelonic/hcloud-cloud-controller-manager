@@ -6,17 +6,23 @@ import (
 	"net"
 	"time"
 
+	"github.com/hetznercloud/hcloud-cloud-controller-manager/internal/annotation"
 	"github.com/hetznercloud/hcloud-cloud-controller-manager/internal/hcops"
 	"github.com/hetznercloud/hcloud-go/hcloud"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/klog/v2"
 )
 
 type routes struct {
-	client      *hcloud.Client
-	network     *hcloud.Network
-	serverCache *hcops.AllServersCache
+	client       *hcloud.Client
+	network      *hcloud.Network
+	serverCache  *hcops.AllServersCache
+	k8sClientSet *kubernetes.Clientset
 }
 
 func newRoutes(client *hcloud.Client, networkID int) (*routes, error) {
@@ -30,10 +36,21 @@ func newRoutes(client *hcloud.Client, networkID int) (*routes, error) {
 		return nil, fmt.Errorf("network not found: %d", networkID)
 	}
 
+	k8sConfig, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("k8s cluster config can't be created: %v", err)
+	}
+
+	k8sClientSet, err := kubernetes.NewForConfig(k8sConfig)
+	if err != nil {
+		return nil, fmt.Errorf("k8s clients can't be initialized: %v", err)
+	}
+
 	return &routes{
-		client:      client,
-		network:     networkObj,
-		serverCache: &hcops.AllServersCache{LoadFunc: client.Server.All},
+		client:       client,
+		network:      networkObj,
+		serverCache:  &hcops.AllServersCache{LoadFunc: client.Server.All},
+		k8sClientSet: k8sClientSet,
 	}, nil
 }
 
@@ -59,14 +76,20 @@ func (r *routes) ListRoutes(ctx context.Context, clusterName string) ([]*cloudpr
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 
-	routes := make([]*cloudprovider.Route, len(r.network.Routes))
-	for i, route := range r.network.Routes {
+	rootServerRoutes := r.getRootServerRoutes(ctx)
+
+	routes := make([]*cloudprovider.Route, 0, len(r.network.Routes)+len(rootServerRoutes))
+
+	for _, route := range r.network.Routes {
 		r, err := r.hcloudRouteToRoute(route)
 		if err != nil {
 			return routes, fmt.Errorf("%s: %w", op, err)
 		}
-		routes[i] = r
+		routes = append(routes, r)
 	}
+
+	routes = append(routes, rootServerRoutes...)
+
 	return routes, nil
 }
 
@@ -75,6 +98,12 @@ func (r *routes) ListRoutes(ctx context.Context, clusterName string) ([]*cloudpr
 // to create a more user-meaningful name.
 func (r *routes) CreateRoute(ctx context.Context, clusterName string, nameHint string, route *cloudprovider.Route) error {
 	const op = "hcloud/CreateRoute"
+
+	if r.isRootServer(ctx, route.TargetNode, op) {
+		// root server has it's own routing
+		klog.InfoS(fmt.Sprintf("skipping root server %v for route creation", route.TargetNode), "op", op)
+		return nil
+	}
 
 	srv, err := r.serverCache.ByName(string(route.TargetNode))
 	if err != nil {
@@ -137,6 +166,12 @@ func (r *routes) CreateRoute(ctx context.Context, clusterName string, nameHint s
 // Route should be as returned by ListRoutes
 func (r *routes) DeleteRoute(ctx context.Context, clusterName string, route *cloudprovider.Route) error {
 	const op = "hcloud/DeleteRoute"
+
+	if r.isRootServer(ctx, route.TargetNode, op) {
+		// root server has it's own routing
+		klog.InfoS(fmt.Sprintf("skipping root server %v for route deletion", route.TargetNode), "op", op)
+		return nil
+	}
 
 	srv, err := r.serverCache.ByName(string(route.TargetNode))
 	if err != nil {
@@ -238,4 +273,65 @@ func findServerPrivateNetByID(srv *hcloud.Server, id int) (hcloud.ServerPrivateN
 		}
 	}
 	return hcloud.ServerPrivateNet{}, false
+}
+
+func (r *routes) getRootServerRoutes(ctx context.Context) []*cloudprovider.Route {
+	nodeList, err := r.k8sClientSet.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return []*cloudprovider.Route{}
+	}
+
+	rootServerRoutes := make([]*cloudprovider.Route, 0, len(nodeList.Items))
+
+	for i, node := range nodeList.Items {
+		isRootServer, err := annotation.HasRootServerLabel(&nodeList.Items[i])
+		if err != nil || !isRootServer {
+			continue
+		}
+
+		if len(node.Spec.PodCIDR) < 1 {
+			continue
+		}
+
+		destination := node.Spec.PodCIDR
+
+		var gateway string
+
+		for _, nodeAddress := range node.Status.Addresses {
+			if nodeAddress.Type == corev1.NodeInternalIP && len(nodeAddress.Address) > 0 {
+				gateway = nodeAddress.Address
+				break
+			}
+		}
+
+		if len(gateway) < 1 {
+			continue
+		}
+
+		route := &cloudprovider.Route{
+			DestinationCIDR: destination,
+			Name:            fmt.Sprintf("%s-%s", gateway, destination),
+			TargetNode:      types.NodeName(node.Name),
+		}
+
+		rootServerRoutes = append(rootServerRoutes, route)
+	}
+
+	return rootServerRoutes
+}
+
+func (r *routes) isRootServer(ctx context.Context, nodeName types.NodeName, op string) bool {
+	node, err := r.k8sClientSet.CoreV1().Nodes().Get(ctx, string(nodeName), metav1.GetOptions{})
+	if err != nil {
+		klog.Warningf("failed to retrieve node info for %v: %v op=%v\n", nodeName, err, op)
+		return false
+	}
+
+	isRootServer, err := annotation.HasRootServerLabel(node)
+	if err != nil {
+		klog.Warningf("failed to retrieve node annotation for %v: %v op=%v\n", nodeName, err, op)
+		return false
+	}
+
+	return isRootServer
 }

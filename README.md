@@ -1,3 +1,13 @@
+# Fork Notes
+
+We experienced issues with having a root server in the cluster: routes can't be created and the node will be labeled as unscheduable because of networking issues.
+
+Changes in this fork make it work for our use-case. This is as follows:
+
+* a root server has a label `instance.hetzner.cloud/is-root-server` set to `true`
+* when kubernetes wants this cloud provider to create/delete routes, nodes with that label are ignored (and no error is returned)
+* when kubernetes wants this cloud provider to list routes we return a route for the root server based on it's pod CIDR and it's internal IP (our setup)
+
 # Kubernetes Cloud Controller Manager for Hetzner Cloud
 
 [![GitHub Actions status](https://github.com/hetznercloud/hcloud-cloud-controller-manager/workflows/Run%20tests/badge.svg)](https://github.com/hetznercloud/hcloud-cloud-controller-manager/actions)
