@@ -32,6 +32,7 @@ import (
 	"github.com/hetznercloud/hcloud-cloud-controller-manager/internal/metrics"
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	"github.com/hetznercloud/hcloud-go/v2/hcloud/metadata"
+	"github.com/hetznercloud/hcloud-cloud-controller-manager/internal/rootserver"
 )
 
 const (
@@ -64,6 +65,7 @@ type cloud struct {
 	routes       *routes
 	loadBalancer *loadBalancers
 	networkID    int64
+	rootServerQueries rootserver.Queries
 }
 
 func newCloud(_ io.Reader) (cloudprovider.Interface, error) {
@@ -164,12 +166,15 @@ func newCloud(_ io.Reader) (cloudprovider.Interface, error) {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 
+	rootServerQueries := rootserver.NewQueries()
+
 	return &cloud{
-		client:       client,
-		instances:    newInstances(client, instancesAddressFamily, networkID),
-		loadBalancer: loadBalancers,
-		routes:       nil,
-		networkID:    networkID,
+		client:            client,
+		instances:         newInstances(client, instancesAddressFamily, networkID, rootServerQueries),
+		loadBalancer:      loadBalancers,
+		routes:            nil,
+		networkID:         networkID,
+		rootServerQueries: rootServerQueries,
 	}, nil
 }
 
@@ -203,7 +208,7 @@ func (c *cloud) Clusters() (cloudprovider.Clusters, bool) {
 
 func (c *cloud) Routes() (cloudprovider.Routes, bool) {
 	if c.networkID > 0 && os.Getenv(hcloudNetworkRoutesEnabledENVVar) != "false" {
-		r, err := newRoutes(c.client, c.networkID)
+		r, err := newRoutes(c.client, c.networkID, c.rootServerQueries)
 		if err != nil {
 			klog.ErrorS(err, "create routes provider", "networkID", c.networkID)
 			return nil, false

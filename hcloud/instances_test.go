@@ -30,6 +30,7 @@ import (
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	"github.com/hetznercloud/hcloud-go/v2/hcloud/schema"
+	"github.com/hetznercloud/hcloud-cloud-controller-manager/internal/rootserver"
 )
 
 // TestInstances_InstanceExists also tests [lookupServer]. The other tests
@@ -58,7 +59,7 @@ func TestInstances_InstanceExists(t *testing.T) {
 		json.NewEncoder(w).Encode(schema.ServerListResponse{Servers: servers})
 	})
 
-	instances := newInstances(env.Client, AddressFamilyIPv4, 0)
+	instances := newInstances(env.Client, AddressFamilyIPv4, 0, rootserver.NewQueriesMock())
 
 	tests := []struct {
 		name     string
@@ -131,7 +132,7 @@ func TestInstances_InstanceShutdown(t *testing.T) {
 		})
 	})
 
-	instances := newInstances(env.Client, AddressFamilyIPv4, 0)
+	instances := newInstances(env.Client, AddressFamilyIPv4, 0, rootserver.NewQueriesMock())
 
 	tests := []struct {
 		name     string
@@ -188,7 +189,7 @@ func TestInstances_InstanceMetadata(t *testing.T) {
 		})
 	})
 
-	instances := newInstances(env.Client, AddressFamilyIPv4, 0)
+	instances := newInstances(env.Client, AddressFamilyIPv4, 0, rootserver.NewQueriesMock())
 
 	metadata, err := instances.InstanceMetadata(context.TODO(), &corev1.Node{
 		Spec: corev1.NodeSpec{ProviderID: "hcloud://1"},

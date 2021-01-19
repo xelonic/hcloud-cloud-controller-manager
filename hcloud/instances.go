@@ -24,6 +24,7 @@ import (
 	cloudprovider "k8s.io/cloud-provider"
 
 	"github.com/hetznercloud/hcloud-cloud-controller-manager/internal/metrics"
+	"github.com/hetznercloud/hcloud-cloud-controller-manager/internal/rootserver"
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 )
 
@@ -39,10 +40,16 @@ type instances struct {
 	client        *hcloud.Client
 	addressFamily addressFamily
 	networkID     int64
+	rootServerQueries rootserver.Queries
 }
 
-func newInstances(client *hcloud.Client, addressFamily addressFamily, networkID int64) *instances {
-	return &instances{client, addressFamily, networkID}
+func newInstances(
+	client *hcloud.Client,
+	addressFamily addressFamily,
+	networkID int64,
+	rootServerQueries rootserver.Queries,
+) *instances {
+	return &instances{client, addressFamily, networkID, rootServerQueries}
 }
 
 // lookupServer attempts to locate the corresponding hcloud.Server for a given corev1.Node
@@ -74,6 +81,10 @@ func (i *instances) InstanceExists(ctx context.Context, node *corev1.Node) (bool
 	const op = "hcloud/instancesv2.InstanceExists"
 	metrics.OperationCalled.WithLabelValues(op).Inc()
 
+	if i.rootServerQueries.IsRootServerByNode(node) {
+		return true, nil
+	}
+
 	server, err := i.lookupServer(ctx, node)
 	if err != nil {
 		return false, err
@@ -100,6 +111,10 @@ func (i *instances) InstanceShutdown(ctx context.Context, node *corev1.Node) (bo
 func (i *instances) InstanceMetadata(ctx context.Context, node *corev1.Node) (*cloudprovider.InstanceMetadata, error) {
 	const op = "hcloud/instancesv2.InstanceMetadata"
 	metrics.OperationCalled.WithLabelValues(op).Inc()
+
+	if i.rootServerQueries.IsRootServerByNode(node) {
+		return i.rootServerQueries.GetInstanceMetadata(node)
+	}
 
 	server, err := i.lookupServer(ctx, node)
 	if err != nil {

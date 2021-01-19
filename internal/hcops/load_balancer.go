@@ -596,7 +596,7 @@ func (l *LoadBalancerOps) ReconcileHCLBTargets(
 	for _, node := range nodes {
 		id, err := providerIDToServerID(node.Spec.ProviderID)
 		if err != nil {
-			return changed, fmt.Errorf("%s: %w", op, err)
+			klog.InfoS("failed to extract server ID from provider ID; skipping it", "op", op, "err", err, "provider_id", node.Spec.ProviderID)
 		}
 		k8sNodeIDs[id] = true
 		k8sNodeNames[id] = node.Name

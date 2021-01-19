@@ -13,16 +13,18 @@ import (
 
 	"github.com/hetznercloud/hcloud-cloud-controller-manager/internal/hcops"
 	"github.com/hetznercloud/hcloud-cloud-controller-manager/internal/metrics"
+	"github.com/hetznercloud/hcloud-cloud-controller-manager/internal/rootserver"
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 )
 
 type routes struct {
-	client      *hcloud.Client
-	network     *hcloud.Network
-	serverCache *hcops.AllServersCache
+	client            *hcloud.Client
+	network           *hcloud.Network
+	serverCache       *hcops.AllServersCache
+	rootServerQueries rootserver.Queries
 }
 
-func newRoutes(client *hcloud.Client, networkID int64) (*routes, error) {
+func newRoutes(client *hcloud.Client, networkID int64, rootServerQueries rootserver.Queries) (*routes, error) {
 	const op = "hcloud/newRoutes"
 	metrics.OperationCalled.WithLabelValues(op).Inc()
 
@@ -43,6 +45,7 @@ func newRoutes(client *hcloud.Client, networkID int64) (*routes, error) {
 			LoadFunc: client.Server.All,
 			Network:  networkObj,
 		},
+		rootServerQueries: rootServerQueries,
 	}, nil
 }
 
@@ -78,6 +81,14 @@ func (r *routes) ListRoutes(ctx context.Context, _ string) ([]*cloudprovider.Rou
 		}
 		routes = append(routes, ro)
 	}
+
+	rootServerRoutes, err := r.rootServerQueries.GetRootServerRoutes(ctx)
+	if err != nil {
+		klog.ErrorS(err, "failed to query root server routes; won't add root server routes", "op", op)
+	} else {
+		routes = append(routes, rootServerRoutes...)
+	}
+
 	return routes, nil
 }
 
@@ -87,6 +98,15 @@ func (r *routes) ListRoutes(ctx context.Context, _ string) ([]*cloudprovider.Rou
 func (r *routes) CreateRoute(ctx context.Context, clusterName string, nameHint string, route *cloudprovider.Route) error {
 	const op = "hcloud/CreateRoute"
 	metrics.OperationCalled.WithLabelValues(op).Inc()
+
+	isRootServer, err := r.rootServerQueries.IsRootServer(ctx, route.TargetNode)
+	if err != nil {
+		klog.ErrorS(err, "failed to query if node is root server; will try to create routes as if it's not one", "op", op, "node", route.TargetNode)
+	} else if isRootServer {
+		// root server has it's own routing
+		klog.InfoS("skipping root server for route creation", "op", op, "node", route.TargetNode)
+		return nil
+	}
 
 	srv, err := r.serverCache.ByName(string(route.TargetNode))
 	if err != nil {
@@ -150,6 +170,15 @@ func (r *routes) CreateRoute(ctx context.Context, clusterName string, nameHint s
 func (r *routes) DeleteRoute(ctx context.Context, _ string, route *cloudprovider.Route) error {
 	const op = "hcloud/DeleteRoute"
 	metrics.OperationCalled.WithLabelValues(op).Inc()
+
+	isRootServer, err := r.rootServerQueries.IsRootServer(ctx, route.TargetNode)
+	if err != nil {
+		klog.ErrorS(err, "failed to query if node is root server; will try to delete routes as if it's not one", "op", op, "node", route.TargetNode)
+	} else if isRootServer {
+		// root server has it's own routing
+		klog.InfoS("skipping root server for route deletion", "op", op, "node", route.TargetNode)
+		return nil
+	}
 
 	// Get target IP from current list of routes, routes can be uniquely identified by their destination cidr.
 	var ip net.IP
